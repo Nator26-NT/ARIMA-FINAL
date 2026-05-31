@@ -1,5 +1,6 @@
 import json
 import time
+import os
 from functools import lru_cache
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
@@ -186,4 +187,5 @@ def get_signals():
     return jsonify(results)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
