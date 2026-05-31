@@ -1,6 +1,8 @@
 import json
 import time
 import os
+import signal
+import logging
 from functools import lru_cache
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
@@ -12,6 +14,10 @@ from sklearn.preprocessing import StandardScaler
 from dtaidistance import dtw
 import warnings
 warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -28,13 +34,17 @@ def get_date_ranges():
     return train_start, train_end, recent_start, recent_end
 
 def fetch_data(pair, start, end, interval):
-    data = yf.download(pair, start=start, end=end, interval=interval, progress=False)
-    if data.empty:
-        data = yf.download(pair, start=start, end=end, interval='1d', progress=False)
-    if 'Adj Close' in data.columns:
-        data = data.drop(columns=['Adj Close'])
-    data.columns = ['open', 'high', 'low', 'close', 'volume']
-    return data
+    try:
+        data = yf.download(pair, start=start, end=end, interval=interval, progress=False, timeout=30)
+        if data.empty:
+            data = yf.download(pair, start=start, end=end, interval='1d', progress=False, timeout=30)
+        if 'Adj Close' in data.columns:
+            data = data.drop(columns=['Adj Close'])
+        data.columns = ['open', 'high', 'low', 'close', 'volume']
+        return data
+    except Exception as e:
+        logger.error(f"Error fetching {pair}: {e}")
+        return pd.DataFrame()
 
 def add_features(df, atr_period):
     df = df.copy()
@@ -72,16 +82,25 @@ def find_cycle_signal(recent_df, train_df, window=48):
     return future, 1.0/(1.0+best_dist)
 
 def get_or_train_model(pair, interval, series):
-    # Create a hash that changes if the series data changes
     series_hash = pd.util.hash_pandas_object(series).sum()
     cache_key = f"{pair}_{interval}_{series_hash}"
     if cache_key in _model_cache:
         return _model_cache[cache_key]
-    model = auto_arima(series, start_p=1, max_p=3, start_q=1, max_q=3,
-                       seasonal=True, m=24, start_P=0, max_P=2, start_Q=0, max_Q=2,
-                       information_criterion='aic', stepwise=True, suppress_warnings=True)
-    _model_cache[cache_key] = model
-    return model
+    # Faster ARIMA for deployment: reduced search space, no seasonality for hourly
+    try:
+        model = auto_arima(series, start_p=1, max_p=2, start_q=1, max_q=2,
+                           seasonal=False,  # Speed improvement
+                           information_criterion='aic', stepwise=True, 
+                           suppress_warnings=True, n_jobs=1)
+        _model_cache[cache_key] = model
+        return model
+    except Exception as e:
+        logger.error(f"ARIMA training failed for {pair}: {e}")
+        # Fallback: return a dummy model that predicts last value
+        class DummyModel:
+            def predict(self, n_periods=1):
+                return pd.Series([series.iloc[-1]] * n_periods)
+        return DummyModel()
 
 def arima_signal(current_close, forecast, volatility, cycle_ret, cycle_conf):
     forecast_return = (forecast - current_close)/current_close
@@ -106,20 +125,42 @@ def compute_tp_sl(price, atr, signal_direction, risk_atr=1.0, reward_ratio=3.0):
         tp = price - reward_amount
     return tp, sl
 
+# Timeout handler for pair processing
+class TimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Pair processing timed out")
+
+def process_pair_with_timeout(pair, interval, atr_period, risk_mult, reward_ratio, timeout_seconds=45):
+    # Set a timeout for this pair
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
+    try:
+        result = process_pair(pair, interval, atr_period, risk_mult, reward_ratio)
+        signal.alarm(0)
+        return result
+    except TimeoutError:
+        logger.error(f"Timeout processing {pair}")
+        return {"pair": pair, "error": "Processing timeout (pair skipped)"}
+    except Exception as e:
+        signal.alarm(0)
+        logger.error(f"Unexpected error in {pair}: {e}")
+        return {"pair": pair, "error": str(e)[:100]}
+
 def process_pair(pair, interval, atr_period, risk_mult, reward_ratio):
     train_start, train_end, recent_start, recent_end = get_date_ranges()
     try:
         train_df = fetch_data(pair, train_start, train_end, interval)
         recent_df = fetch_data(pair, recent_start, recent_end, interval)
         if train_df.empty or recent_df.empty:
-            return None
+            return {"pair": pair, "error": "No data fetched"}
 
         train_feat = add_features(train_df, atr_period)
         recent_feat = add_features(recent_df, atr_period)
         if len(recent_feat) < 10:
-            return None
+            return {"pair": pair, "error": "Insufficient recent data"}
 
-        # Pass interval to cache key
         model = get_or_train_model(pair, interval, train_feat['close'])
 
         latest_idx = len(recent_feat) - 1
@@ -138,7 +179,6 @@ def process_pair(pair, interval, atr_period, risk_mult, reward_ratio):
         tp, sl = compute_tp_sl(current_price, current_atr, signal,
                                risk_atr=risk_mult, reward_ratio=reward_ratio)
 
-        # Convert index to string for JSON serialization
         chart_data = {
             "dates": [str(d) for d in recent_feat.index],
             "prices": recent_feat['close'].tolist(),
@@ -163,6 +203,7 @@ def process_pair(pair, interval, atr_period, risk_mult, reward_ratio):
             "error": None
         }
     except Exception as e:
+        logger.exception(f"Error in process_pair for {pair}")
         return {"pair": pair, "error": str(e)[:100]}
 
 @app.route('/')
@@ -171,20 +212,32 @@ def index():
 
 @app.route('/api/signals', methods=['POST'])
 def get_signals():
-    data = request.get_json()
-    pairs_raw = data.get('pairs', 'EURUSD=X, GBPUSD=X, USDJPY=X, AUDUSD=X, USDCAD=X, USDCHF=X, NZDUSD=X')
-    pair_list = [p.strip().upper() for p in pairs_raw.split(',') if p.strip()]
-    interval = data.get('interval', '1h')
-    atr_period = int(data.get('atr_period', 14))
-    risk_mult = float(data.get('risk_mult', 1.0))
-    reward_ratio = 3.0
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON payload"}), 400
+            
+        pairs_raw = data.get('pairs', 'EURUSD=X, GBPUSD=X, USDJPY=X, AUDUSD=X, USDCAD=X, USDCHF=X, NZDUSD=X')
+        pair_list = [p.strip().upper() for p in pairs_raw.split(',') if p.strip()]
+        interval = data.get('interval', '1h')
+        atr_period = int(data.get('atr_period', 14))
+        risk_mult = float(data.get('risk_mult', 1.0))
+        reward_ratio = 3.0
 
-    results = []
-    for pair in pair_list:
-        res = process_pair(pair, interval, atr_period, risk_mult, reward_ratio)
-        if res:
-            results.append(res)
-    return jsonify(results)
+        results = []
+        for pair in pair_list:
+            res = process_pair_with_timeout(pair, interval, atr_period, risk_mult, reward_ratio, timeout_seconds=45)
+            if res:
+                results.append(res)
+        
+        # If no valid results, return an empty array with a note
+        if not results or all(r.get('error') for r in results):
+            return jsonify([])  # Frontend will show "No data returned"
+        
+        return jsonify(results)
+    except Exception as e:
+        logger.exception("Unhandled exception in /api/signals")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
