@@ -1,0 +1,8 @@
+flask
+yfinance
+pandas
+numpy
+pmdarima
+scikit-learn
+dtaidistance
+plotly

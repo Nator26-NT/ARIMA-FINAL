@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>ARIMA Trader's Home | Live Forex Signals</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js" charset="utf-8"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation Bar -->
+        <nav class="navbar">
+            <div class="logo">
+                <i class="fas fa-chart-line"></i> 
+                <span>ARIMA<span class="accent">Trader</span></span>
+            </div>
+            <div class="nav-links">
+                <span class="badge-live"><i class="fas fa-circle"></i> LIVE</span>
+                <span class="time-display" id="serverTime"></span>
+            </div>
+        </nav>
+
+        <!-- Main Dashboard Grid -->
+        <div class="dashboard">
+            <!-- Settings Sidebar (Card) -->
+            <aside class="settings-card">
+                <h3><i class="fas fa-sliders-h"></i> Trading Console</h3>
+                <div class="settings-group">
+                    <label><i class="fas fa-currency-exchange"></i> Pairs (comma separated)</label>
+                    <textarea id="pairs" rows="3">EURUSD=X, GBPUSD=X, USDJPY=X, AUDUSD=X, USDCAD=X, USDCHF=X, NZDUSD=X</textarea>
+                </div>
+                <div class="settings-group">
+                    <label><i class="fas fa-chart-bar"></i> Data interval</label>
+                    <select id="interval">
+                        <option value="1h" selected>📊 1 Hour</option>
+                        <option value="1d">📈 Daily</option>
+                    </select>
+                </div>
+                <div class="settings-group">
+                    <label><i class="fas fa-waveform"></i> ATR Period</label>
+                    <div class="slider-container">
+                        <input type="range" id="atr_period" min="7" max="21" value="14" step="1">
+                        <span id="atr_value">14</span>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <label><i class="fas fa-exclamation-triangle"></i> Risk (ATR units)</label>
+                    <div class="slider-container">
+                        <input type="range" id="risk_mult" min="1.0" max="3.0" value="1.0" step="0.5">
+                        <span id="risk_value">1.0</span>
+                    </div>
+                </div>
+                <button id="refreshBtn" class="btn-primary"><i class="fas fa-sync-alt"></i> Refresh Signals</button>
+                <div class="info-note">
+                    <i class="fas fa-info-circle"></i> 3:1 Reward:Risk | Auto ARIMA per pair
+                </div>
+            </aside>
+
+            <!-- Main Content Area -->
+            <main class="main-content">
+                <!-- Loading & Error Overlays -->
+                <div id="loading" class="loading-card hidden">
+                    <i class="fas fa-spinner fa-pulse"></i> Processing pairs, training models...
+                </div>
+                <div id="errorMsg" class="error-card hidden"></div>
+
+                <!-- Signals Summary Table -->
+                <div id="summary" class="summary-section"></div>
+
+                <!-- Actionable Trades (Cards) -->
+                <div id="actionable" class="actionable-section"></div>
+
+                <!-- Charts Expanders -->
+                <div id="charts" class="charts-section"></div>
+            </main>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
